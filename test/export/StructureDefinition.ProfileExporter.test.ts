@@ -9,7 +9,8 @@ import {
   BindingRule,
   CaretValueRule,
   ContainsRule,
-  AssignmentRule
+  AssignmentRule,
+  CardRule
 } from '../../src/fshtypes/rules';
 import { MismatchedTypeError } from '../../src/errors';
 
@@ -521,5 +522,122 @@ describe('ProfileExporter', () => {
     expect(loggerSpy.getLastMessage('error')).toMatch(
       /Inline extensions should only be defined in Extensions/s
     );
+  });
+
+  // contentReferenceProfile: https://hl7.org/fhir/6.0.0-snapshot1/profiling.html#recurse
+  describe('contentReferenceProfile', () => {
+    const contentReferenceProfileUrl =
+      'http://hl7.org/fhir/StructureDefinition/contentReferenceProfile';
+    const caretRule = (path: string, caretPath: string, value: any) => {
+      const rule = new CaretValueRule(path);
+      rule.caretPath = caretPath;
+      rule.value = value;
+      return rule;
+    };
+    const questionnaireProfile = (name: string, path: string, reference: string) => {
+      const profile = new Profile(name).withFile('Questionnaires.fsh').withLocation([3, 1, 8, 20]);
+      profile.parent = 'Questionnaire';
+      profile.rules.push(
+        caretRule(path, 'extension[0].url', contentReferenceProfileUrl),
+        caretRule(path, 'extension[0].valueUri', reference)
+      );
+      doc.profiles.set(profile.name, profile);
+      return profile;
+    };
+
+    it('should not warn when a fragment reference resolves in the profile itself', () => {
+      questionnaireProfile('RecursiveQuestionnaire', 'item.item', '#Questionnaire.item');
+      const exported = exporter.export().profiles;
+      expect(exported).toHaveLength(1);
+      expect(loggerSpy.getAllMessages('warn')).toHaveLength(0);
+      expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+    });
+
+    it('should not warn when a reference to another profile resolves, exporting it on demand', () => {
+      questionnaireProfile(
+        'UsesItemLibrary',
+        'item',
+        'http://hl7.org/fhir/us/minimal/StructureDefinition/ItemLibrary#Questionnaire.item'
+      );
+      const library = new Profile('ItemLibrary');
+      library.parent = 'Questionnaire';
+      doc.profiles.set(library.name, library);
+      const exported = exporter.export().profiles;
+      expect(exported.map(p => p.name)).toEqual(['UsesItemLibrary', 'ItemLibrary']);
+      expect(loggerSpy.getAllMessages('warn')).toHaveLength(0);
+      expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+    });
+
+    it('should warn when the referenced profile cannot be found', () => {
+      questionnaireProfile(
+        'BrokenQuestionnaire',
+        'item.item',
+        'http://example.org/StructureDefinition/Missing#Questionnaire.item'
+      );
+      exporter.export();
+      expect(loggerSpy.getAllMessages('warn')).toHaveLength(1);
+      expect(loggerSpy.getLastMessage('warn')).toMatch(
+        /Cannot resolve contentReferenceProfile on Questionnaire\.item\.item: http:\/\/example\.org\/StructureDefinition\/Missing was not found\..*File: Questionnaires\.fsh.*Line: 3 - 8/s
+      );
+    });
+
+    it('should warn when the referenced element cannot be found', () => {
+      questionnaireProfile('BrokenQuestionnaire', 'item.item', '#Questionnaire.missing');
+      exporter.export();
+      expect(loggerSpy.getAllMessages('warn')).toHaveLength(1);
+      expect(loggerSpy.getLastMessage('warn')).toMatch(
+        /Cannot resolve contentReferenceProfile on Questionnaire\.item\.item: .*\/BrokenQuestionnaire has no element Questionnaire\.missing\./
+      );
+    });
+
+    it('should warn once when slices repeat the element that carries the reference', () => {
+      // Profile: BrokenQuestionnaire
+      // Parent: Questionnaire
+      // * item ^slicing.discriminator[0].type = #value
+      // * item ^slicing.discriminator[0].path = "type"
+      // * item ^slicing.rules = #open
+      // * item contains group 0..*
+      // * item[group].type = #group
+      // * item.item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+      // * item.item ^extension[0].valueUri = "#Questionnaire.missing"
+      const profile = new Profile('BrokenQuestionnaire').withFile('Questionnaires.fsh');
+      profile.parent = 'Questionnaire';
+      const containsRule = new ContainsRule('item');
+      containsRule.items.push({ name: 'group' });
+      const groupCard = new CardRule('item[group]');
+      groupCard.min = 0;
+      groupCard.max = '*';
+      const groupType = new AssignmentRule('item[group].type');
+      groupType.value = new FshCode('group');
+      profile.rules.push(
+        caretRule('item', 'slicing.discriminator[0].type', new FshCode('value')),
+        caretRule('item', 'slicing.discriminator[0].path', 'type'),
+        caretRule('item', 'slicing.rules', new FshCode('open')),
+        containsRule,
+        groupCard,
+        groupType,
+        caretRule('item.item', 'extension[0].url', contentReferenceProfileUrl),
+        caretRule('item.item', 'extension[0].valueUri', '#Questionnaire.missing')
+      );
+      doc.profiles.set(profile.name, profile);
+      exporter.export();
+      expect(loggerSpy.getAllMessages('warn')).toHaveLength(1);
+      expect(loggerSpy.getLastMessage('warn')).toMatch(
+        /Cannot resolve contentReferenceProfile on Questionnaire\.item\.item: /
+      );
+    });
+
+    it('should warn when the reference has no element id', () => {
+      questionnaireProfile(
+        'BrokenQuestionnaire',
+        'item.item',
+        'http://example.org/StructureDefinition/Missing'
+      );
+      exporter.export();
+      expect(loggerSpy.getAllMessages('warn')).toHaveLength(1);
+      expect(loggerSpy.getLastMessage('warn')).toMatch(
+        /Invalid contentReferenceProfile on Questionnaire\.item\.item: http:\/\/example\.org\/StructureDefinition\/Missing\. The value must be the canonical URL of a profile followed by '#' and an element id\./
+      );
+    });
   });
 });

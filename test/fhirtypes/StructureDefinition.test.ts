@@ -6,7 +6,15 @@ import { ElementDefinition, ElementDefinitionType } from '../../src/fhirtypes/El
 import { getTestFHIRDefinitions, loggerSpy, testDefsPath, TestFisher } from '../testhelpers';
 import { FshCode, Invariant, Logical, Mapping, Profile, Resource } from '../../src/fshtypes';
 import { Type } from '../../src/utils/Fishable';
-import { AddElementRule, ObeysRule, OnlyRule } from '../../src/fshtypes/rules';
+import {
+  AddElementRule,
+  AssignmentRule,
+  CardRule,
+  CaretValueRule,
+  ContainsRule,
+  ObeysRule,
+  OnlyRule
+} from '../../src/fshtypes/rules';
 import { InstanceDefinition } from '../../src/fhirtypes';
 import { FSHDocument, FSHTank } from '../../src/import';
 import { minimalConfig } from '../utils/minimalConfig';
@@ -1740,6 +1748,146 @@ describe('StructureDefinition', () => {
       respRate = fisher.fishForStructureDefinition('resprate');
       bundle = fisher.fishForStructureDefinition('Bundle');
       CSSPC = fisher.fishForStructureDefinition('capabilitystatement-search-parameter-combination');
+    });
+
+    // contentReferenceProfile: https://hl7.org/fhir/6.0.0-snapshot1/profiling.html#recurse
+    describe('with contentReferenceProfile', () => {
+      const contentReferenceProfileUrl =
+        'http://hl7.org/fhir/StructureDefinition/contentReferenceProfile';
+      let recursiveFisher: TestFisher;
+      let recursive: StructureDefinition;
+
+      beforeAll(() => {
+        const caretRule = (path: string, caretPath: string, value: any) => {
+          const rule = new CaretValueRule(path);
+          rule.caretPath = caretPath;
+          rule.value = value;
+          return rule;
+        };
+        const cardRule = (path: string, min: number, max: string) => {
+          const rule = new CardRule(path);
+          rule.min = min;
+          rule.max = max;
+          return rule;
+        };
+        const assignmentRule = (path: string, value: any) => {
+          const rule = new AssignmentRule(path);
+          rule.value = value;
+          return rule;
+        };
+        // Profile: RecursiveQuestionnaire
+        // Parent: Questionnaire
+        // * item.item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item.item ^extension[0].valueUri = "#Questionnaire.item"
+        // * item.text 1..1
+        // * item.readOnly 0..0
+        // * item ^slicing.discriminator[0].type = #value
+        // * item ^slicing.discriminator[0].path = "type"
+        // * item ^slicing.rules = #open
+        // * item contains group 0..* and question 0..*
+        // * item[group].type = #group
+        // * item[question].type = #string
+        // * item[question].item 0..0
+        const profile = new Profile('RecursiveQuestionnaire');
+        profile.parent = 'Questionnaire';
+        const containsRule = new ContainsRule('item');
+        containsRule.items.push({ name: 'group' }, { name: 'question' });
+        profile.rules.push(
+          caretRule('item.item', 'extension[0].url', contentReferenceProfileUrl),
+          caretRule('item.item', 'extension[0].valueUri', '#Questionnaire.item'),
+          cardRule('item.text', 1, '1'),
+          cardRule('item.readOnly', 0, '0'),
+          caretRule('item', 'slicing.discriminator[0].type', new FshCode('value')),
+          caretRule('item', 'slicing.discriminator[0].path', 'type'),
+          caretRule('item', 'slicing.rules', new FshCode('open')),
+          containsRule,
+          cardRule('item[group]', 0, '*'),
+          cardRule('item[question]', 0, '*'),
+          assignmentRule('item[group].type', new FshCode('group')),
+          assignmentRule('item[question].type', new FshCode('string')),
+          cardRule('item[question].item', 0, '0')
+        );
+        const doc = new FSHDocument('fileName');
+        doc.profiles.set(profile.name, profile);
+        const tank = new FSHTank([doc], minimalConfig);
+        const pkg = new Package(tank.config);
+        recursiveFisher = new TestFisher(tank, defs, pkg);
+        new StructureDefinitionExporter(tank, pkg, recursiveFisher).export();
+      });
+
+      beforeEach(() => {
+        loggerSpy.reset();
+        recursive = StructureDefinition.fromJSON(
+          recursiveFisher.fishForFHIR('RecursiveQuestionnaire')
+        );
+      });
+
+      it('should find a named slice that a contentReferenceProfile on the sliced element defines', () => {
+        const { pathParts } = recursive.validateValueAtPath(
+          'item[group].item[question].text',
+          'Question',
+          recursiveFisher
+        );
+        expect(pathParts.map(p => p.base)).toEqual(['item', 'item', 'text']);
+        const nestedItem = recursive.findElement('Questionnaire.item:group.item');
+        expect(nestedItem.type[0].code).toBe('BackboneElement');
+        expect(nestedItem.contentReference).toBeUndefined();
+        expect(nestedItem.slicing).toEqual(recursive.findElement('Questionnaire.item').slicing);
+        expect(
+          recursive.findElement('Questionnaire.item:group.item:question.type').patternCode
+        ).toBe('string');
+        expect(recursive.findElement('Questionnaire.item:group.item.text').min).toBe(1);
+      });
+
+      it('should follow references on imported elements as the path continues', () => {
+        recursive.validateValueAtPath(
+          'item[group].item[group].item[question].text',
+          'Question',
+          recursiveFisher
+        );
+        expect(
+          recursive.findElement('Questionnaire.item:group.item:group.item:question.type')
+            .patternCode
+        ).toBe('string');
+        expect(
+          recursive.findElement('Questionnaire.item:group.item:group.item').extension
+        ).toContainEqual({
+          url: contentReferenceProfileUrl,
+          valueUri: `${minimalConfig.canonical}/StructureDefinition/RecursiveQuestionnaire#Questionnaire.item`
+        });
+      });
+
+      it('should import referenced content only once', () => {
+        recursive.validateValueAtPath(
+          'item[group].item[question].text',
+          'Question',
+          recursiveFisher
+        );
+        const count = recursive.elements.length;
+        recursive.validateValueAtPath('item[group].item[question].linkId', 'q', recursiveFisher);
+        recursive.validateValueAtPath('item[group].item[group].text', 'Group', recursiveFisher);
+        expect(recursive.elements).toHaveLength(count);
+        expect(new Set(recursive.elements.map(e => e.id)).size).toBe(count);
+      });
+
+      it('should log an error once when a contentReferenceProfile cannot be resolved and keep the base content', () => {
+        const nestedItem = recursive.findElement('Questionnaire.item:group.item');
+        nestedItem.extension.find(e => e.url === contentReferenceProfileUrl).valueUri =
+          'http://example.org/StructureDefinition/Missing#Questionnaire.item';
+        recursive.validateValueAtPath('item[group].item[0].text', 'Text', recursiveFisher);
+        recursive.validateValueAtPath('item[group].item[0].linkId', 'Id', recursiveFisher);
+        expect(() =>
+          recursive.validateValueAtPath(
+            'item[group].item[question].text',
+            'Question',
+            recursiveFisher
+          )
+        ).toThrow(/does not exist/);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(1);
+        expect(loggerSpy.getLastMessage('error')).toMatch(
+          /Cannot resolve contentReferenceProfile on Questionnaire\.item:group\.item: http:\/\/example\.org\/StructureDefinition\/Missing was not found\./
+        );
+      });
     });
 
     // Simple value

@@ -1546,6 +1546,8 @@ export class StructureDefinitionExporter implements Fishable {
       structDef.getOwnStructureDefinition(this.fisher)
     );
 
+    this.checkContentReferenceProfiles(structDef, fshDefinition);
+
     // check for another structure definition with the same id
     // see https://www.hl7.org/fhir/resource.html#id
     // the structure definition has already been added to the package, so it's fine if it matches itself
@@ -1603,6 +1605,27 @@ export class StructureDefinitionExporter implements Fishable {
         );
       }
     });
+  }
+
+  /**
+   * Warns about contentReferenceProfile extensions whose value cannot be resolved. Instances of the
+   * profile resolve the references again when they use them; this reports the problem once, where
+   * the profile is defined. Fishing through the exporter exports a referenced profile on demand.
+   * @param {StructureDefinition} structDef - the exported StructureDefinition
+   * @param {Profile | Extension | Logical | Resource} fshDefinition - the FSH definition it came from
+   */
+  private checkContentReferenceProfiles(
+    structDef: StructureDefinition,
+    fshDefinition: Profile | Extension | Logical | Resource
+  ): void {
+    structDef.elements
+      .filter(element => element.hasContentReferenceProfile())
+      .forEach(element => {
+        const { problem } = element.resolveContentReferenceProfile(this, fshDefinition.sourceInfo);
+        if (problem) {
+          logger.warn(problem, fshDefinition.sourceInfo);
+        }
+      });
   }
 
   /**

@@ -8621,6 +8621,639 @@ describe('InstanceExporter', () => {
       ]);
     });
 
+    // contentReferenceProfile: https://hl7.org/fhir/6.0.0-snapshot1/profiling.html#recurse
+    describe('with contentReferenceProfile', () => {
+      const contentReferenceProfileUrl =
+        'http://hl7.org/fhir/StructureDefinition/contentReferenceProfile';
+      const caretRule = (path: string, caretPath: string, value: any) => {
+        const rule = new CaretValueRule(path);
+        rule.caretPath = caretPath;
+        rule.value = value;
+        return rule;
+      };
+      const cardRule = (path: string, min: number, max: string) => {
+        const rule = new CardRule(path);
+        rule.min = min;
+        rule.max = max;
+        return rule;
+      };
+      const assignmentRule = (path: string, value: any) => {
+        const rule = new AssignmentRule(path);
+        rule.value = value;
+        return rule;
+      };
+      // * <path> ^slicing.discriminator[0].type = #value
+      // * <path> ^slicing.discriminator[0].path = "<discriminatorPath>"
+      // * <path> ^slicing.rules = #open
+      // * <path> contains <sliceName> 0..* and ...
+      const slicingRules = (path: string, discriminatorPath: string, ...sliceNames: string[]) => {
+        const containsRule = new ContainsRule(path);
+        sliceNames.forEach(name => containsRule.items.push({ name }));
+        return [
+          caretRule(path, 'slicing.discriminator[0].type', new FshCode('value')),
+          caretRule(path, 'slicing.discriminator[0].path', discriminatorPath),
+          caretRule(path, 'slicing.rules', new FshCode('open')),
+          containsRule,
+          ...sliceNames.map(name => cardRule(`${path}[${name}]`, 0, '*'))
+        ];
+      };
+      // * <path> ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+      // * <path> ^extension[0].valueUri = "<reference>"
+      const contentReferenceProfileRules = (path: string, reference: string) => [
+        caretRule(path, 'extension[0].url', contentReferenceProfileUrl),
+        caretRule(path, 'extension[0].valueUri', reference)
+      ];
+      const newInstance = (name: string, instanceOf: string) => {
+        const instance = new Instance(name);
+        instance.instanceOf = instanceOf;
+        instance.usage = 'Example';
+        instance.rules.push(assignmentRule('status', new FshCode('active')));
+        doc.instances.set(instance.name, instance);
+        return instance;
+      };
+      let recursiveInstance: Instance;
+
+      beforeEach(() => {
+        // Profile: RecursiveQuestionnaire
+        // Parent: Questionnaire
+        // * item.item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item.item ^extension[0].valueUri = "#Questionnaire.item"
+        // * item.text 1..1
+        // * item.readOnly 0..0
+        // * item ^slicing.discriminator[0].type = #value
+        // * item ^slicing.discriminator[0].path = "type"
+        // * item ^slicing.rules = #open
+        // * item contains group 0..* and question 0..*
+        // * item[group].type = #group
+        // * item[question].type = #string
+        // * item[question].item 0..0
+        const recursive = new Profile('RecursiveQuestionnaire');
+        recursive.parent = 'Questionnaire';
+        recursive.rules.push(
+          ...contentReferenceProfileRules('item.item', '#Questionnaire.item'),
+          cardRule('item.text', 1, '1'),
+          cardRule('item.readOnly', 0, '0'),
+          ...slicingRules('item', 'type', 'group', 'question'),
+          assignmentRule('item[group].type', new FshCode('group')),
+          assignmentRule('item[question].type', new FshCode('string')),
+          cardRule('item[question].item', 0, '0')
+        );
+        doc.profiles.set(recursive.name, recursive);
+
+        // Profile: ItemTypes
+        // Parent: Questionnaire
+        // * item 1..*
+        // * item.item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item.item ^extension[0].valueUri = "#Questionnaire.item"
+        // * item.type = #group
+        // * item.text 1..1
+        const itemTypes = new Profile('ItemTypes');
+        itemTypes.parent = 'Questionnaire';
+        itemTypes.rules.push(
+          cardRule('item', 1, '*'),
+          ...contentReferenceProfileRules('item.item', '#Questionnaire.item'),
+          assignmentRule('item.type', new FshCode('group')),
+          cardRule('item.text', 1, '1')
+        );
+        doc.profiles.set(itemTypes.name, itemTypes);
+
+        // Profile: UsesItemTypes
+        // Parent: Questionnaire
+        // * item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item ^extension[0].valueUri = "http://hl7.org/fhir/us/minimal/StructureDefinition/ItemTypes#Questionnaire.item"
+        // * item.readOnly 0..0
+        const usesItemTypes = new Profile('UsesItemTypes');
+        usesItemTypes.parent = 'Questionnaire';
+        usesItemTypes.rules.push(
+          ...contentReferenceProfileRules(
+            'item',
+            `${minimalConfig.canonical}/StructureDefinition/ItemTypes#Questionnaire.item`
+          ),
+          cardRule('item.readOnly', 0, '0')
+        );
+        doc.profiles.set(usesItemTypes.name, usesItemTypes);
+
+        // Profile: DerivedQuestionnaire
+        // Parent: UsesItemTypes
+        // * item.item.definition 0..0
+        const derived = new Profile('DerivedQuestionnaire');
+        derived.parent = 'UsesItemTypes';
+        derived.rules.push(cardRule('item.item.definition', 0, '0'));
+        doc.profiles.set(derived.name, derived);
+
+        // Profile: SectionQuestionnaire
+        // Parent: Questionnaire
+        // * item.text 1..1
+        // * item.item ^slicing.discriminator[0].type = #value
+        // * item.item ^slicing.discriminator[0].path = "type"
+        // * item.item ^slicing.rules = #open
+        // * item.item contains group 0..* and question 0..*
+        // * item.item[group].type = #group
+        // * item.item[group] ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item.item[group] ^extension[0].valueUri = "#Questionnaire.item"
+        // * item.item[question].type = #string
+        // * item.item[question].item 0..0
+        const section = new Profile('SectionQuestionnaire');
+        section.parent = 'Questionnaire';
+        section.rules.push(
+          cardRule('item.text', 1, '1'),
+          ...slicingRules('item.item', 'type', 'group', 'question'),
+          assignmentRule('item.item[group].type', new FshCode('group')),
+          ...contentReferenceProfileRules('item.item[group]', '#Questionnaire.item'),
+          assignmentRule('item.item[question].type', new FshCode('string')),
+          cardRule('item.item[question].item', 0, '0')
+        );
+        doc.profiles.set(section.name, section);
+
+        // Profile: FixedItem
+        // Parent: Questionnaire
+        // * item.linkId = "fixed"
+        // * item.type = #display
+        // * item.text 1..1
+        // * item.text = "Fixed"
+        const fixedItem = new Profile('FixedItem');
+        fixedItem.parent = 'Questionnaire';
+        fixedItem.rules.push(
+          assignmentRule('item.linkId', 'fixed'),
+          assignmentRule('item.type', new FshCode('display')),
+          cardRule('item.text', 1, '1'),
+          assignmentRule('item.text', 'Fixed')
+        );
+        doc.profiles.set(fixedItem.name, fixedItem);
+
+        // Profile: RequiredFixedItem
+        // Parent: Questionnaire
+        // * item 1..1
+        // * item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item ^extension[0].valueUri = "http://hl7.org/fhir/us/minimal/StructureDefinition/FixedItem#Questionnaire.item"
+        const requiredFixedItem = new Profile('RequiredFixedItem');
+        requiredFixedItem.parent = 'Questionnaire';
+        requiredFixedItem.rules.push(
+          cardRule('item', 1, '1'),
+          ...contentReferenceProfileRules(
+            'item',
+            `${minimalConfig.canonical}/StructureDefinition/FixedItem#Questionnaire.item`
+          )
+        );
+        doc.profiles.set(requiredFixedItem.name, requiredFixedItem);
+
+        // Profile: SlicedLibrary
+        // Parent: Questionnaire
+        // * item ^slicing.discriminator[0].type = #value
+        // * item ^slicing.discriminator[0].path = "type"
+        // * item ^slicing.rules = #open
+        // * item contains group 0..*
+        // * item[group].type = #group
+        // * item.text 1..1
+        const slicedLibrary = new Profile('SlicedLibrary');
+        slicedLibrary.parent = 'Questionnaire';
+        slicedLibrary.rules.push(
+          ...slicingRules('item', 'type', 'group'),
+          assignmentRule('item[group].type', new FshCode('group')),
+          cardRule('item.text', 1, '1')
+        );
+        doc.profiles.set(slicedLibrary.name, slicedLibrary);
+
+        // Profile: ReslicingQuestionnaire
+        // Parent: Questionnaire
+        // * item ^slicing.discriminator[0].type = #value
+        // * item ^slicing.discriminator[0].path = "linkId"
+        // * item ^slicing.rules = #open
+        // * item contains outer 0..*
+        // * item[outer].linkId = "outer"
+        // * item[outer] ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item[outer] ^extension[0].valueUri = "http://hl7.org/fhir/us/minimal/StructureDefinition/SlicedLibrary#Questionnaire.item"
+        const reslicing = new Profile('ReslicingQuestionnaire');
+        reslicing.parent = 'Questionnaire';
+        reslicing.rules.push(
+          ...slicingRules('item', 'linkId', 'outer'),
+          assignmentRule('item[outer].linkId', 'outer'),
+          ...contentReferenceProfileRules(
+            'item[outer]',
+            `${minimalConfig.canonical}/StructureDefinition/SlicedLibrary#Questionnaire.item`
+          )
+        );
+        doc.profiles.set(reslicing.name, reslicing);
+
+        // Profile: InitialLibrary
+        // Parent: Questionnaire
+        // * item.initial 1..1
+        // * item.initial.value[x] only integer
+        // * item.initial.valueInteger = 42
+        const initialLibrary = new Profile('InitialLibrary');
+        initialLibrary.parent = 'Questionnaire';
+        const onlyInteger = new OnlyRule('item.initial.value[x]');
+        onlyInteger.types = [{ type: 'integer' }];
+        initialLibrary.rules.push(
+          cardRule('item.initial', 1, '1'),
+          onlyInteger,
+          assignmentRule('item.initial.valueInteger', 42)
+        );
+        doc.profiles.set(initialLibrary.name, initialLibrary);
+
+        // Profile: UsesInitialLibrary
+        // Parent: Questionnaire
+        // * item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item ^extension[0].valueUri = "http://hl7.org/fhir/us/minimal/StructureDefinition/InitialLibrary#Questionnaire.item"
+        const usesInitialLibrary = new Profile('UsesInitialLibrary');
+        usesInitialLibrary.parent = 'Questionnaire';
+        usesInitialLibrary.rules.push(
+          ...contentReferenceProfileRules(
+            'item',
+            `${minimalConfig.canonical}/StructureDefinition/InitialLibrary#Questionnaire.item`
+          )
+        );
+        doc.profiles.set(usesInitialLibrary.name, usesInitialLibrary);
+
+        // Extension: ItemHint
+        const itemHint = new Extension('ItemHint');
+        doc.extensions.set(itemHint.name, itemHint);
+
+        // Profile: HintedQuestionnaire
+        // Parent: Questionnaire
+        // * item.extension contains ItemHint named hint 0..1
+        // * item.item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item.item ^extension[0].valueUri = "#Questionnaire.item"
+        const hinted = new Profile('HintedQuestionnaire');
+        hinted.parent = 'Questionnaire';
+        const hintContains = new ContainsRule('item.extension');
+        hintContains.items.push({ name: 'hint', type: 'ItemHint' });
+        hinted.rules.push(
+          hintContains,
+          cardRule('item.extension[hint]', 0, '1'),
+          ...contentReferenceProfileRules('item.item', '#Questionnaire.item')
+        );
+        doc.profiles.set(hinted.name, hinted);
+
+        // Profile: LateReferenceQuestionnaire
+        // Parent: Questionnaire
+        // * item ^slicing.discriminator[0].type = #value
+        // * item ^slicing.discriminator[0].path = "type"
+        // * item ^slicing.rules = #open
+        // * item contains group 0..* and question 0..*
+        // * item[group].type = #group
+        // * item[question].type = #string
+        // * item[question].item 0..0
+        // * item.item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item.item ^extension[0].valueUri = "#Questionnaire.item"
+        const lateReference = new Profile('LateReferenceQuestionnaire');
+        lateReference.parent = 'Questionnaire';
+        lateReference.rules.push(
+          ...slicingRules('item', 'type', 'group', 'question'),
+          assignmentRule('item[group].type', new FshCode('group')),
+          assignmentRule('item[question].type', new FshCode('string')),
+          cardRule('item[question].item', 0, '0'),
+          ...contentReferenceProfileRules('item.item', '#Questionnaire.item')
+        );
+        doc.profiles.set(lateReference.name, lateReference);
+
+        recursiveInstance = newInstance('RecursiveInstance', 'RecursiveQuestionnaire');
+      });
+
+      it('should apply a reference that was declared after the slices were unfolded', () => {
+        const instance = newInstance('LateReferenceInstance', 'LateReferenceQuestionnaire');
+        instance.rules.push(
+          assignmentRule('item[group].linkId', 'group-0'),
+          assignmentRule('item[group].text', 'Group 0'),
+          assignmentRule('item[group].item[group].linkId', 'group-1'),
+          assignmentRule('item[group].item[group].text', 'Group 1'),
+          assignmentRule('item[group].item[group].item[question].linkId', 'question'),
+          assignmentRule('item[group].item[group].item[question].text', 'Question')
+        );
+        const exported = exportInstance(instance);
+        expect(exported.item[0].type).toBe('group');
+        expect(exported.item[0].item[0].type).toBe('group');
+        expect(exported.item[0].item[0].item[0].type).toBe('string');
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+      });
+
+      it.each([1, 6, 20])(
+        'should assign named slices and implied values through %i nested groups',
+        depth => {
+          let path = '';
+          for (let i = 0; i < depth; i++) {
+            path += `${path ? '.' : ''}item[group]`;
+            recursiveInstance.rules.push(
+              assignmentRule(`${path}.linkId`, `group-${i}`),
+              assignmentRule(`${path}.text`, `Group ${i}`)
+            );
+          }
+          path += '.item[question]';
+          recursiveInstance.rules.push(
+            assignmentRule(`${path}.linkId`, 'question'),
+            assignmentRule(`${path}.text`, 'Question')
+          );
+          const exported = exportInstance(recursiveInstance);
+          expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+          let expected: any = { linkId: 'question', text: 'Question', type: 'string' };
+          for (let i = depth - 1; i >= 0; i--) {
+            expected = {
+              linkId: `group-${i}`,
+              text: `Group ${i}`,
+              type: 'group',
+              item: [expected]
+            };
+          }
+          expect(exported.item).toEqual([expected]);
+        }
+      );
+
+      it('should apply a prohibition from the referenced profile at a nested level', () => {
+        recursiveInstance.rules.push(
+          assignmentRule('item[group].linkId', 'outer'),
+          assignmentRule('item[group].text', 'Outer'),
+          assignmentRule('item[group].item[group].linkId', 'inner'),
+          assignmentRule('item[group].item[group].text', 'Inner'),
+          assignmentRule('item[group].item[group].readOnly', true)
+        );
+        const exported = exportInstance(recursiveInstance);
+        expect(exported.item[0].item[0].readOnly).toBeUndefined();
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(1);
+        expect(loggerSpy.getLastMessage('error')).toMatch(
+          /The element or path you referenced does not exist: item\[group\]\.item\[group\]\.readOnly/
+        );
+      });
+
+      it('should apply a prohibition on a referenced slice at a nested level', () => {
+        recursiveInstance.rules.push(
+          assignmentRule('item[group].linkId', 'outer'),
+          assignmentRule('item[group].text', 'Outer'),
+          assignmentRule('item[group].item[question].linkId', 'question'),
+          assignmentRule('item[group].item[question].text', 'Question'),
+          assignmentRule('item[group].item[question].item[0].linkId', 'invalid')
+        );
+        const exported = exportInstance(recursiveInstance);
+        expect(exported.item[0].item[0].item).toBeUndefined();
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(1);
+        expect(loggerSpy.getLastMessage('error')).toMatch(
+          /The element or path you referenced does not exist: item\[group\]\.item\[question\]\.item\.linkId/
+        );
+      });
+
+      it('should apply a referenced element from another profile and follow its references', () => {
+        const instance = newInstance('UsesItemTypesInstance', 'UsesItemTypes');
+        instance.rules.push(
+          assignmentRule('item[0].linkId', 'root'),
+          assignmentRule('item[0].text', 'Root'),
+          assignmentRule('item[0].item[0].linkId', 'child'),
+          assignmentRule('item[0].item[0].text', 'Child'),
+          assignmentRule('item[0].item[0].item[0].linkId', 'grandchild'),
+          assignmentRule('item[0].item[0].item[0].text', 'Grandchild'),
+          assignmentRule('item[0].readOnly', true)
+        );
+        const exported = exportInstance(instance);
+        expect(exported.item).toEqual([
+          {
+            linkId: 'root',
+            text: 'Root',
+            type: 'group',
+            item: [
+              {
+                linkId: 'child',
+                text: 'Child',
+                type: 'group',
+                item: [{ linkId: 'grandchild', text: 'Grandchild', type: 'group' }]
+              }
+            ]
+          }
+        ]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(1);
+        expect(loggerSpy.getLastMessage('error')).toMatch(
+          /The element or path you referenced does not exist: item\.readOnly/
+        );
+      });
+
+      it('should merge referenced content into elements that a derived profile defines', () => {
+        const instance = newInstance('DerivedInstance', 'DerivedQuestionnaire');
+        instance.rules.push(
+          assignmentRule('item[0].linkId', 'root'),
+          assignmentRule('item[0].text', 'Root'),
+          assignmentRule('item[0].item[0].linkId', 'child'),
+          assignmentRule('item[0].item[0].text', 'Child'),
+          assignmentRule('item[0].item[0].definition', 'http://example.org/definition')
+        );
+        const exported = exportInstance(instance);
+        expect(exported.item).toEqual([
+          {
+            linkId: 'root',
+            text: 'Root',
+            type: 'group',
+            item: [{ linkId: 'child', text: 'Child', type: 'group' }]
+          }
+        ]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(1);
+        expect(loggerSpy.getLastMessage('error')).toMatch(
+          /The element or path you referenced does not exist: item\.item\.definition/
+        );
+      });
+
+      it('should import slices that are defined on a child of the referenced element', () => {
+        const instance = newInstance('SectionInstance', 'SectionQuestionnaire');
+        instance.rules.push(
+          assignmentRule('item[0].linkId', 'root'),
+          assignmentRule('item[0].text', 'Root'),
+          assignmentRule('item[0].type', new FshCode('group')),
+          assignmentRule('item[0].item[group].linkId', 'outer'),
+          assignmentRule('item[0].item[group].text', 'Outer'),
+          assignmentRule('item[0].item[group].item[group].linkId', 'inner'),
+          assignmentRule('item[0].item[group].item[group].text', 'Inner'),
+          assignmentRule('item[0].item[group].item[group].item[question].linkId', 'question'),
+          assignmentRule('item[0].item[group].item[group].item[question].text', 'Question'),
+          assignmentRule('item[0].item[group].item[question].linkId', 'other'),
+          assignmentRule('item[0].item[group].item[question].text', 'Other'),
+          assignmentRule('item[0].item[group].item[question].item[0].linkId', 'invalid')
+        );
+        const exported = exportInstance(instance);
+        expect(exported.item).toEqual([
+          {
+            linkId: 'root',
+            text: 'Root',
+            type: 'group',
+            item: [
+              {
+                linkId: 'outer',
+                text: 'Outer',
+                type: 'group',
+                item: [
+                  {
+                    linkId: 'inner',
+                    text: 'Inner',
+                    type: 'group',
+                    item: [{ linkId: 'question', text: 'Question', type: 'string' }]
+                  },
+                  { linkId: 'other', text: 'Other', type: 'string' }
+                ]
+              }
+            ]
+          }
+        ]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(1);
+        expect(loggerSpy.getLastMessage('error')).toMatch(
+          /The element or path you referenced does not exist: item\.item\[group\]\.item\[question\]\.item\.linkId/
+        );
+      });
+
+      it('should apply referenced values to a required element that no rule path reaches', () => {
+        const instance = newInstance('RequiredFixedInstance', 'RequiredFixedItem');
+        const exported = exportInstance(instance);
+        expect(exported.item).toEqual([{ linkId: 'fixed', type: 'display', text: 'Fixed' }]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+      });
+
+      it('should export the same content regardless of the instances exported before it', () => {
+        const alone = newInstance('AloneInstance', 'RequiredFixedItem');
+        const exportedAlone = exportInstance(alone);
+        const walking = newInstance('WalkingInstance', 'RequiredFixedItem');
+        walking.rules.push(assignmentRule('item[0].linkId', 'fixed'));
+        exportInstance(walking);
+        const after = newInstance('AfterInstance', 'RequiredFixedItem');
+        const exportedAfter = exportInstance(after);
+        expect(exportedAfter.item).toEqual(exportedAlone.item);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+      });
+
+      it('should assign a reslice that the referenced element defines on a referencing slice', () => {
+        const instance = newInstance('ReslicingInstance', 'ReslicingQuestionnaire');
+        instance.rules.push(
+          assignmentRule('item[outer][group].linkId', 'outer'),
+          assignmentRule('item[outer][group].text', 'Outer group')
+        );
+        const exported = exportInstance(instance);
+        expect(exported.item).toEqual([{ linkId: 'outer', type: 'group', text: 'Outer group' }]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+      });
+
+      it('should imply a value on a choice element that the referenced element restricts', () => {
+        const instance = newInstance('InitialInstance', 'UsesInitialLibrary');
+        instance.rules.push(
+          assignmentRule('item[0].linkId', 'root'),
+          assignmentRule('item[0].type', new FshCode('integer'))
+        );
+        const exported = exportInstance(instance);
+        expect(exported.item).toEqual([
+          { linkId: 'root', type: 'integer', initial: [{ valueInteger: 42 }] }
+        ]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+      });
+
+      // https://github.com/FHIR/sushi/issues/699
+      it('should assign an extension that the referenced element declares on nested items', () => {
+        const instance = newInstance('HintedInstance', 'HintedQuestionnaire');
+        instance.rules.push(
+          assignmentRule('item[0].linkId', '1'),
+          assignmentRule('item[0].type', new FshCode('group')),
+          assignmentRule('item[0].extension[hint].valueString', 'root hint'),
+          assignmentRule('item[0].item[0].linkId', '1.1'),
+          assignmentRule('item[0].item[0].type', new FshCode('group')),
+          assignmentRule('item[0].item[0].extension[hint].valueString', 'nested hint'),
+          assignmentRule('item[0].item[0].item[0].linkId', '1.1.1'),
+          assignmentRule('item[0].item[0].item[0].type', new FshCode('display')),
+          assignmentRule('item[0].item[0].item[0].extension[hint].valueString', 'deep hint')
+        );
+        const exported = exportInstance(instance);
+        const hint = (valueString: string) => [
+          { url: 'http://hl7.org/fhir/us/minimal/StructureDefinition/ItemHint', valueString }
+        ];
+        expect(exported.item).toEqual([
+          {
+            linkId: '1',
+            type: 'group',
+            extension: hint('root hint'),
+            item: [
+              {
+                linkId: '1.1',
+                type: 'group',
+                extension: hint('nested hint'),
+                item: [{ linkId: '1.1.1', type: 'display', extension: hint('deep hint') }]
+              }
+            ]
+          }
+        ]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+      });
+
+      it('should not change the exported profiles', () => {
+        sdExporter.export();
+        const exportedProfiles = cloneDeep(pkg.profiles.map(profile => profile.toJSON()));
+        recursiveInstance.rules.push(
+          assignmentRule('item[group].linkId', 'outer'),
+          assignmentRule('item[group].text', 'Outer'),
+          assignmentRule('item[group].item[group].linkId', 'inner'),
+          assignmentRule('item[group].item[group].text', 'Inner'),
+          assignmentRule('item[group].item[group].item[question].linkId', 'question'),
+          assignmentRule('item[group].item[group].item[question].text', 'Question')
+        );
+        exporter.exportInstance(recursiveInstance);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(0);
+        expect(pkg.profiles.map(profile => profile.toJSON())).toEqual(exportedProfiles);
+      });
+
+      it('should log an error once when a contentReferenceProfile cannot be resolved', () => {
+        // Profile: BrokenQuestionnaire
+        // Parent: Questionnaire
+        // * item.item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item.item ^extension[0].valueUri = "http://example.org/StructureDefinition/Missing#Questionnaire.item"
+        const broken = new Profile('BrokenQuestionnaire');
+        broken.parent = 'Questionnaire';
+        broken.rules.push(
+          ...contentReferenceProfileRules(
+            'item.item',
+            'http://example.org/StructureDefinition/Missing#Questionnaire.item'
+          )
+        );
+        doc.profiles.set(broken.name, broken);
+        const instance = newInstance('BrokenInstance', 'BrokenQuestionnaire');
+        instance.rules.push(
+          assignmentRule('item[0].linkId', 'root'),
+          assignmentRule('item[0].type', new FshCode('group')),
+          assignmentRule('item[0].item[0].linkId', 'child'),
+          assignmentRule('item[0].item[0].text', 'Child'),
+          assignmentRule('item[0].item[0].type', new FshCode('display'))
+        );
+        const exported = exportInstance(instance);
+        expect(exported.item).toEqual([
+          {
+            linkId: 'root',
+            type: 'group',
+            item: [{ linkId: 'child', text: 'Child', type: 'display' }]
+          }
+        ]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(1);
+        expect(loggerSpy.getLastMessage('error')).toMatch(
+          /Cannot resolve contentReferenceProfile on Questionnaire\.item\.item: http:\/\/example\.org\/StructureDefinition\/Missing was not found\./
+        );
+      });
+
+      it('should log an error when a contentReferenceProfile has no element id', () => {
+        // Profile: NoElementQuestionnaire
+        // Parent: Questionnaire
+        // * item.item ^extension[0].url = "http://hl7.org/fhir/StructureDefinition/contentReferenceProfile"
+        // * item.item ^extension[0].valueUri = "http://example.org/StructureDefinition/Missing"
+        const noElement = new Profile('NoElementQuestionnaire');
+        noElement.parent = 'Questionnaire';
+        noElement.rules.push(
+          ...contentReferenceProfileRules(
+            'item.item',
+            'http://example.org/StructureDefinition/Missing'
+          )
+        );
+        doc.profiles.set(noElement.name, noElement);
+        const instance = newInstance('NoElementInstance', 'NoElementQuestionnaire');
+        instance.rules.push(
+          assignmentRule('item[0].linkId', 'root'),
+          assignmentRule('item[0].type', new FshCode('group')),
+          assignmentRule('item[0].item[0].linkId', 'child'),
+          assignmentRule('item[0].item[0].type', new FshCode('display'))
+        );
+        const exported = exportInstance(instance);
+        expect(exported.item[0].item).toEqual([{ linkId: 'child', type: 'display' }]);
+        expect(loggerSpy.getAllMessages('error')).toHaveLength(1);
+        expect(loggerSpy.getLastMessage('error')).toMatch(
+          /Invalid contentReferenceProfile on Questionnaire\.item\.item: http:\/\/example\.org\/StructureDefinition\/Missing\. The value must be the canonical URL of a profile followed by '#' and an element id\./
+        );
+      });
+    });
+
     // Validating required elements
     it('should log an error when a required element is not present', () => {
       const cardRule = new CardRule('active');

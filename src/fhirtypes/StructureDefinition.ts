@@ -631,6 +631,23 @@ export class StructureDefinition {
         pathPart.brackets?.forEach(p => (currentPath += `[${p}]`));
       }
       currentElement = this.findElementByPath(currentPath, fisher);
+      if (currentElement == null) {
+        // A named slice may be defined by a contentReferenceProfile on the sliced element or,
+        // for a reslice, on the slice that it extends
+        const brackets =
+          arrayIndex != null ? pathPart.brackets.slice(0, -1) : (pathPart.brackets ?? []);
+        for (let depth = brackets.length - 1; depth >= 0 && currentElement == null; depth--) {
+          const basePath = `${previousPath ? `${previousPath}.` : ''}${pathPart.base}${brackets
+            .slice(0, depth)
+            .map(b => `[${b}]`)
+            .join('')}`;
+          const baseElement = this.findElementByPath(basePath, fisher);
+          if (baseElement?.unfoldContentReferenceProfile(fisher, sourceInfo)) {
+            currentElement = this.findElementByPath(currentPath, fisher);
+          }
+        }
+      }
+      currentElement?.unfoldContentReferenceProfile(fisher, sourceInfo);
       // If the current element is sliced and the element is being accesed by numeric
       // indices, warn to use the sliceName in the following cases:
       // 1. The slicing is closed in which case a slice is certainly being accessed numerically

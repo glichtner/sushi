@@ -444,6 +444,7 @@ export function setImpliedPropertiesOnInstance(
           if (ce.children().length == 0) {
             ce.unfold(fisher);
           }
+          ce.unfoldContentReferenceProfile(fisher);
         }
       });
     }
@@ -479,7 +480,9 @@ export function setImpliedPropertiesOnInstance(
           }
         }
       }
-      // check the children for instance of this element
+      // check the children for instance of this element, including those that a
+      // contentReferenceProfile defines, since no rule path may have reached this element
+      currentElement.def.unfoldContentReferenceProfile(fisher);
       const children = currentElement.def.children(true);
       // special handling: if our current element has no slice name, we need guarantee the defined minimum
       // this is the only place where we do this, in order to accomodate cases where some named slices already exist
@@ -519,6 +522,7 @@ export function setImpliedPropertiesOnInstance(
         sdRuleMap.set(tracePath, foundAssignedValue);
         requirementRoots.set(tracePath, currentElement.requirementRoot);
       }
+      currentElement.def.unfoldContentReferenceProfile(fisher);
       let children = currentElement.def.children(true);
       // if the matching rule assigns a resource, we don't need to dig into it any deeper
       if (children.length == 0 && !assignedResourcePaths.includes(matchingRule)) {

@@ -133,6 +133,21 @@ const UNINHERITED_ED_EXTENSIONS = [
 
 const PROFILE_ELEMENT_EXTENSION =
   'http://hl7.org/fhir/StructureDefinition/elementdefinition-profile-element';
+const CONTENT_REFERENCE_PROFILE_EXTENSION =
+  'http://hl7.org/fhir/StructureDefinition/contentReferenceProfile';
+// Properties that need their own handling when an element imported through a contentReferenceProfile
+// extension is applied to an element that the receiving profile already defines
+const CONTENT_REFERENCE_PROFILE_SEPARATE_PROPS = [
+  'id',
+  'path',
+  'sliceName',
+  'sliceIsConstraining',
+  'contentReference',
+  'type',
+  'min',
+  'max',
+  'extension'
+];
 
 export class ElementDefinitionType {
   private _actualCode: string;
@@ -340,6 +355,7 @@ export class ElementDefinition {
   private _original: ElementDefinition;
   private _edStructureDefinition: StructureDefinition;
   private _replacementProps: string[][];
+  private _unfoldedContentReferenceProfile: string;
 
   /**
    * Constructs a new ElementDefinition with the given ID.
@@ -2827,6 +2843,224 @@ export class ElementDefinition {
   }
 
   /**
+   * Applies the contentReferenceProfile extension that applies to this element. The children and slices
+   * of the referenced element are imported into this element's StructureDefinition, and the referenced
+   * element's slicing and type are applied to this element. Elements that the receiving profile
+   * already defines keep their own values and only receive missing properties, intersected
+   * cardinalities, and missing extensions. Only one level of reference is followed; references on
+   * imported elements are resolved when a path reaches them.
+   *
+   * This is intended for the private StructureDefinition copies that the InstanceExporter works on.
+   * Problems with the reference are logged once per element.
+   * @see {@link https://hl7.org/fhir/6.0.0-snapshot1/profiling.html#recurse}
+   * @param {Fishable} fisher - A fishable implementation for finding definitions and metadata
+   * @param {SourceInfo} sourceInfo - Source info of the rule being processed, used when logging problems
+   * @returns {boolean} true if this call imported content, false if there was nothing to import
+   */
+  unfoldContentReferenceProfile(fisher: Fishable, sourceInfo?: SourceInfo): boolean {
+    const reference = this.getContentReferenceProfile();
+    if (!reference || this._unfoldedContentReferenceProfile === reference) {
+      return false;
+    }
+    // Remember the reference so that content is imported once and problems are reported once
+    this._unfoldedContentReferenceProfile = reference;
+    const { target, problem } = this.resolveContentReferenceProfile(fisher, sourceInfo);
+    if (problem) {
+      logger.error(problem, sourceInfo);
+    }
+    if (target == null) {
+      return false;
+    }
+    // The referenced element's slicing and type apply to this element. Its cardinality does not,
+    // since it describes the referenced element's own occurrences rather than the nested ones.
+    if (this.slicing == null && target.slicing != null) {
+      this.slicing = cloneDeep(target.slicing);
+    }
+    this.applyContentReferenceProfileType(target);
+    const sourceUrl = target.structDef.version
+      ? `${target.structDef.url}|${target.structDef.version}`
+      : target.structDef.url;
+    const sourceElements = [
+      ...target.children(),
+      ...flatten(target.getSlices().map(slice => [slice, ...slice.children()]))
+    ];
+    sourceElements.forEach(source => {
+      const imported = source.clone();
+      const suffix = source.id.slice(target.id.length);
+      if (/^[:/]/.test(suffix)) {
+        // A slice of the referenced element becomes a slice of this element,
+        // or a reslice when this element is itself a slice
+        const sliceEnd = suffix.indexOf('.');
+        const relativeSliceName = suffix.slice(1, sliceEnd < 0 ? undefined : sliceEnd);
+        imported.id = `${this.id}${this.sliceName ? '/' : ':'}${relativeSliceName}${
+          sliceEnd < 0 ? '' : suffix.slice(sliceEnd)
+        }`;
+        if (sliceEnd < 0) {
+          imported.sliceName = this.sliceName
+            ? `${this.sliceName}/${relativeSliceName}`
+            : relativeSliceName;
+        }
+      } else {
+        imported.id = `${this.id}${suffix}`;
+      }
+      imported.structDef = this.structDef;
+      imported.removeUninheritedExtensions();
+      // A fragment refers to the profile the element was copied from, not to the one receiving it
+      imported.extension?.forEach(e => {
+        if (e.url === CONTENT_REFERENCE_PROFILE_EXTENSION && e.valueUri?.startsWith('#')) {
+          e.valueUri = `${sourceUrl}${e.valueUri}`;
+        }
+      });
+      imported.captureOriginal();
+      const existing = this.structDef.findElement(imported.id);
+      if (existing) {
+        existing.applyContentReferenceProfileElement(imported);
+      } else {
+        this.structDef.addElement(imported);
+      }
+    });
+    return true;
+  }
+
+  /**
+   * Indicates whether this element itself carries the contentReferenceProfile extension.
+   * @returns {boolean} true if the extension is present on this element
+   */
+  hasContentReferenceProfile(): boolean {
+    return this.extension?.some(e => e.url === CONTENT_REFERENCE_PROFILE_EXTENSION) ?? false;
+  }
+
+  /**
+   * Returns the value of the contentReferenceProfile extension that applies to this element. An
+   * element below a slice that does not carry the extension itself takes it from its counterpart on
+   * the sliced element, because the slice's children may have been unfolded before the extension was
+   * set there. A slice itself does not inherit the extension: its content comes from the referenced
+   * element's slice, or it opts in with an extension of its own.
+   * @returns {string} the reference, or undefined if no contentReferenceProfile applies
+   */
+  private getContentReferenceProfile(): string | undefined {
+    const own = this.extension?.find(e => e.url === CONTENT_REFERENCE_PROFILE_EXTENSION)?.valueUri;
+    if (own != null || this.sliceName != null || !this.id.includes(':')) {
+      return own;
+    }
+    return this.findConnectedSliceElement()?.getContentReferenceProfile();
+  }
+
+  /**
+   * Resolves the contentReferenceProfile extension that applies to this element. The value uses the
+   * format of a contentReference: the canonical URL of a profile, followed by '#' and the id of an
+   * element in that profile. A value that starts with '#' points into this element's own profile.
+   * @param {Fishable} fisher - A fishable implementation for finding definitions and metadata
+   * @param {SourceInfo} sourceInfo - Source info to use when fishing reports a version problem
+   * @returns {object} the referenced element, or a description of the problem when the value
+   *   cannot be resolved; both are absent when no contentReferenceProfile applies to this element
+   */
+  resolveContentReferenceProfile(
+    fisher: Fishable,
+    sourceInfo?: SourceInfo
+  ): { target?: ElementDefinition; problem?: string } {
+    const reference = this.getContentReferenceProfile();
+    if (!reference) {
+      return {};
+    }
+    const separator = reference.indexOf('#');
+    if (separator < 0) {
+      return {
+        problem:
+          `Invalid contentReferenceProfile on ${this.id}: ${reference}. The value must be the ` +
+          "canonical URL of a profile followed by '#' and an element id."
+      };
+    }
+    const url =
+      separator === 0
+        ? `${this.structDef.url}${this.structDef.version ? `|${this.structDef.version}` : ''}`
+        : reference.slice(0, separator);
+    const elementId = reference.slice(separator + 1);
+    const json = fishForFHIRBestVersion(
+      fisher,
+      url,
+      sourceInfo,
+      Type.Profile,
+      Type.Logical,
+      Type.Resource
+    );
+    if (json == null) {
+      return {
+        problem: `Cannot resolve contentReferenceProfile on ${this.id}: ${url} was not found.`
+      };
+    }
+    const target = StructureDefinition.fromJSON(json).findElement(elementId);
+    if (target == null) {
+      return {
+        problem: `Cannot resolve contentReferenceProfile on ${this.id}: ${url} has no element ${elementId}.`
+      };
+    }
+    return { target };
+  }
+
+  /**
+   * Applies the type of an element from a referenced profile to this element. A missing type is
+   * copied and replaces a contentReference. Otherwise the types are narrowed to those that both
+   * elements allow, since a referenced profile usually restricts a choice or adds a profile.
+   * Types that only the referenced element allows are ignored; the validator reports the conflict.
+   * @param {ElementDefinition} source - the element from the referenced profile
+   */
+  private applyContentReferenceProfileType(source: ElementDefinition): void {
+    if (source.type == null) {
+      return;
+    }
+    if (this.type == null) {
+      this.type = cloneDeep(source.type);
+      delete this.contentReference;
+      return;
+    }
+    const narrowed = this.type.filter(t => source.type.some(s => s.code === t.code));
+    if (narrowed.length > 0) {
+      narrowed.forEach(t => {
+        const sourceType = source.type.find(s => s.code === t.code);
+        if (t.profile == null && sourceType.profile != null) {
+          t.profile = cloneDeep(sourceType.profile);
+        }
+        if (t.targetProfile == null && sourceType.targetProfile != null) {
+          t.targetProfile = cloneDeep(sourceType.targetProfile);
+        }
+      });
+      this.type = narrowed;
+    }
+  }
+
+  /**
+   * Applies an element imported through a contentReferenceProfile extension to this element, which
+   * the receiving profile already defines. Properties that this element has are kept, missing ones
+   * are copied, cardinalities are intersected, and extensions that are missing by url are added.
+   * The validator remains responsible for checking both sets of constraints together.
+   * @param {ElementDefinition} imported - the element imported from the referenced profile
+   */
+  private applyContentReferenceProfileElement(imported: ElementDefinition): void {
+    Object.keys(imported.toJSON()).forEach(prop => {
+      // @ts-ignore
+      if (!CONTENT_REFERENCE_PROFILE_SEPARATE_PROPS.includes(prop) && this[prop] == null) {
+        // @ts-ignore
+        this[prop] = cloneDeep(imported[prop]);
+      }
+    });
+    this.applyContentReferenceProfileType(imported);
+    if (imported.min != null) {
+      this.min = this.min == null ? imported.min : Math.max(this.min, imported.min);
+    }
+    if (imported.max != null) {
+      const toNumber = (max: string) => (max === '*' ? Infinity : parseInt(max));
+      const max = Math.min(toNumber(this.max ?? '*'), toNumber(imported.max));
+      this.max = Number.isFinite(max) ? String(max) : '*';
+    }
+    imported.extension?.forEach(extension => {
+      if (!this.extension?.some(e => e.url === extension.url)) {
+        this.extension = [...(this.extension ?? []), cloneDeep(extension)];
+      }
+    });
+  }
+
+  /**
    * Returns an array of an ElementDefinition's unfolded children.
    * @param {ElementDefinition} targetElement - The ElementDefinition being unfolded
    * @param {boolean} recaptureSliceExtensions - Indicates whether or not slice extensions should be recaptured
@@ -3130,6 +3364,8 @@ export class ElementDefinition {
     const savedTreeChildren = this.treeChildren;
     this.treeChildren = undefined;
     const clone = cloneDeep(this);
+    // Content imported through a contentReferenceProfile stays with the original element
+    clone._unfoldedContentReferenceProfile = undefined;
     // Set the reference to the StructureDefinition and nearby ElementDefinitions again
     // we want the clone to know about the StructureDefinition, but not have any tree relationships
     this.structDef = clone.structDef = savedStructDef;
